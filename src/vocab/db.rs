@@ -1,3 +1,5 @@
+use crate::LinguaError;
+
 #[derive(Debug)]
 pub struct VocabEntry {
     pub lemma: String,
@@ -12,7 +14,7 @@ pub struct VocabDb {
 }
 
 impl VocabDb {
-    pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn open(path: &str) -> Result<Self, LinguaError> {
         let conn = rusqlite::Connection::open(path)?;
         conn.execute_batch(
             "
@@ -31,7 +33,7 @@ impl VocabDb {
         Ok(Self { conn })
     }
 
-    pub fn save(&self, entry: &VocabEntry) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self, entry: &VocabEntry) -> Result<(), LinguaError> {
         self.conn.execute(
             "INSERT OR IGNORE INTO vocab (lemma, pos, translation, source_form, context)
             VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -46,7 +48,7 @@ impl VocabDb {
         Ok(())
     }
 
-    pub fn list(&self) -> Result<Vec<VocabEntry>, Box<dyn std::error::Error>> {
+    pub fn list(&self) -> Result<Vec<VocabEntry>, LinguaError> {
         let mut stmt = self
             .conn
             .prepare("SELECT lemma, pos, translation, source_form, context FROM vocab")?;

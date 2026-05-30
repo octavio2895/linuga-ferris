@@ -30,22 +30,6 @@ impl fmt::Display for SessionConfig {
     }
 }
 
-#[derive(Parser)]
-#[command(name = "lingua-ferris", about = "Dein Deutschlehrer")]
-struct Cli {
-    #[arg(long, default_value = "b2")]
-    level: String,
-
-    #[arg(long, default_value = "general")]
-    topic: String,
-
-    #[arg(long, default_value_t = 1024)]
-    max_tokens: u32,
-
-    #[arg(long)]
-    verbose: bool,
-}
-
 impl SessionConfig {
     pub fn from_cli() -> Self {
         let cli = Cli::parse();
@@ -65,4 +49,20 @@ impl SessionConfig {
             self.topic
         )
     }
+}
+
+#[derive(Parser)]
+#[command(name = "lingua-ferris", about = "Dein Deutschlehrer")]
+struct Cli {
+    #[arg(long, default_value = "b2")]
+    level: String,
+
+    #[arg(long, default_value = "general")]
+    topic: String,
+
+    #[arg(long, default_value_t = 1024)]
+    max_tokens: u32,
+
+    #[arg(long)]
+    verbose: bool,
 }

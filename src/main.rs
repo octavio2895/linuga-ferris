@@ -1,16 +1,18 @@
 mod api;
 mod config;
+mod error;
 mod vocab;
 
-use api::{Message, call_api};
+use api::{Message, call_api_with_retry};
+pub use error::LinguaError;
 use std::io;
 use vocab::lemma::{Lemmatizer, NaiveLemmatizer};
 use vocab::{VocabDb, VocabEntry};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), LinguaError> {
     dotenvy::dotenv().ok();
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not found");
+    let api_key = std::env::var("ANTHROPIC_API_KEY")?;
 
     let client = reqwest::Client::new();
     let mut history: Vec<Message> = Vec::new();
@@ -65,7 +67,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if vocab_list.is_empty() {
                             println!("Keine Wörter gespeichert.")
                         } else {
-                            println!("List: {:?}", vocab_list);
+                            println!("\n--- Vokcabelliste ({} Wörter) ---", vocab_list.len());
+                            for entry in &vocab_list {
+                                println!(
+                                    "  {:<20} ({}) - {}",
+                                    entry.lemma,
+                                    entry.pos,
+                                    entry.translation.as_deref().unwrap_or("_")
+                                );
+                            }
                         }
                     }
                     Some(other) => {
@@ -83,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let message = Message::new("user", user_input);
             history.push(message);
 
-            let response = call_api(&client, &api_key, &history, &system_prompt).await?;
+            let response = call_api_with_retry(&client, &api_key, &history, &system_prompt).await?;
             println!("Lehrer: {}", response);
             let message = Message::new("assistant", &response);
             history.push(message);

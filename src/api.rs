@@ -1,3 +1,5 @@
+use crate::LinguaError;
+
 #[derive(serde::Serialize, Clone)]
 pub struct Message {
     pub role: String,
@@ -31,12 +33,12 @@ struct ApiResponse {
     content: Vec<ContentBlock>,
 }
 
-pub async fn call_api(
+async fn call_api(
     client: &reqwest::Client,
     api_key: &str,
     history: &[Message],
     system: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, LinguaError> {
     let request_body = ApiRequest {
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
@@ -59,6 +61,31 @@ pub async fn call_api(
         .content
         .into_iter()
         .next()
-        .ok_or("empty response")?
+        .ok_or(LinguaError::EmptyResponse)?
         .text)
+}
+
+pub async fn call_api_with_retry(
+    client: &reqwest::Client,
+    api_key: &str,
+    history: &[Message],
+    system: &str,
+) -> Result<String, LinguaError> {
+    let mut delay = std::time::Duration::from_millis(500);
+
+    for attempt in 1..=3 {
+        match call_api(client, api_key, history, system).await {
+            Ok(response) => return Ok(response),
+            Err(LinguaError::Api(e)) if attempt < 3 => {
+                eprintln!(
+                    "Attempt {} failed ({}), retrying in {:?}...",
+                    attempt, e, delay
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
 }
