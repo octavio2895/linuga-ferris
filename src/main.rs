@@ -1,175 +1,11 @@
-// Your task
-// Update Cargo.toml with the four dependencies above. Then rewrite main.rs to:
-//
-// Load the API key from a .env file
-// Define these structs (with appropriate derives):
-//
-// Message { role: String, content: String }
-// ApiRequest { model: String, max_tokens: u32, system: String, messages: Vec<Message> }
-// ContentBlock { text: String } — to deserialize the response
-// ApiResponse { content: Vec<ContentBlock> } — the top-level response
-//
-//
-// Write an async fn call_api(api_key: &str, user_input: &str) -> Result<String, Box<dyn std::error::Error>> that builds the request, sends it with reqwest, deserializes the response, and returns the text
-// Call it from main, print the result
+mod api;
+mod config;
+mod vocab;
 
+use api::{Message, call_api};
 use std::io;
-
-struct LemmaResult {
-    lemma: String,
-    pos: String,
-    gender: Option<String>,
-    translation: Option<String>,
-}
-
-#[derive(Debug)]
-struct VocabEntry {
-    lemma: String,
-    pos: String,
-    translation: Option<String>,
-    source_form: String,
-    context: Option<String>,
-}
-
-trait Lemmatizer {
-    fn lemmatize(&self, word: &str, context: &str) -> LemmaResult;
-}
-
-struct NativeLemmatizer;
-
-impl Lemmatizer for NativeLemmatizer {
-    fn lemmatize(&self, word: &str, _context: &str) -> LemmaResult {
-        LemmaResult {
-            lemma: word.to_lowercase(),
-            pos: "unknown".to_string(),
-            gender: None,
-            translation: None,
-        }
-    }
-}
-
-struct VocabDb {
-    conn: rusqlite::Connection,
-}
-
-impl VocabDb {
-    fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let conn = rusqlite::Connection::open(path)?;
-        conn.execute_batch(
-            "
-    CREATE TABLE IF NOT EXISTS vocab (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        lemma       TEXT NOT NULL,
-        pos         TEXT NOT NULL,
-        translation TEXT,
-        source_form TEXT NOT NULL,
-        context     TEXT,
-        added_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(lemma, pos)
-    );
-",
-        )?;
-        Ok(Self { conn })
-    }
-
-    fn save(&self, entry: &VocabEntry) -> Result<(), Box<dyn std::error::Error>> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO vocab (lemma, pos, translation, source_form, context)
-            VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                entry.lemma,
-                entry.pos,
-                entry.translation,
-                entry.source_form,
-                entry.context
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn list(&self) -> Result<Vec<VocabEntry>, Box<dyn std::error::Error>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT lemma, pos, translation, source_form, context FROM vocab")?;
-        let entries = stmt
-            .query_map([], |row| {
-                Ok(VocabEntry {
-                    lemma: row.get(0)?,
-                    pos: row.get(1)?,
-                    translation: row.get(2)?,
-                    source_form: row.get(3)?,
-                    context: row.get(4)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((entries))
-    }
-}
-
-#[derive(serde::Serialize, Clone)]
-struct Message {
-    role: String,
-    content: String,
-}
-
-impl Message {
-    fn new(role: &str, content: &str) -> Message {
-        Message {
-            role: role.to_string(),
-            content: content.to_string(),
-        }
-    }
-}
-
-#[derive(serde::Serialize)]
-struct ApiRequest<'a> {
-    model: &'a str,
-    max_tokens: u32,
-    system: &'a str,
-    messages: &'a [Message],
-}
-
-#[derive(serde::Deserialize)]
-struct ContentBlock {
-    text: String,
-}
-
-#[derive(serde::Deserialize)]
-struct ApiResponse {
-    content: Vec<ContentBlock>,
-}
-
-async fn call_api(
-    client: &reqwest::Client,
-    api_key: &str,
-    history: &[Message],
-) -> Result<String, Box<dyn std::error::Error>> {
-    let request_body = ApiRequest {
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
-        system: "Du bist ein freundlicher Deutschlehrer. \
-                 Antworte immer auf Deutsch und korrigiere grammatikalische Fehler.",
-        messages: history,
-    };
-
-    let response = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&request_body) // serializes your struct automatically
-        .send()
-        .await?
-        .json::<ApiResponse>() // deserializes response into ApiResponse
-        .await?;
-
-    Ok(response
-        .content
-        .into_iter()
-        .next()
-        .ok_or("empty response")?
-        .text)
-}
+use vocab::lemma::{Lemmatizer, NaiveLemmatizer};
+use vocab::{VocabDb, VocabEntry};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -180,8 +16,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut history: Vec<Message> = Vec::new();
 
     println!("Was möchtest du üben? (What would you like to practice?)");
-    let vocab = VocabDb::open("vocab.db")?;
-    let lemmatizer = NativeLemmatizer;
+    let vocab_db = VocabDb::open("vocab.db")?;
+    let lemmatizer = NaiveLemmatizer;
+
+    let session_config = config::SessionConfig::from_cli();
+
+    if session_config.verbose {
+        println!("SessionConfig: {}", session_config);
+    }
+    let system_prompt = session_config.build_system_prompt();
 
     loop {
         let mut input = String::new();
@@ -212,13 +55,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 translation: None,
                                 context: Some(context.to_string()),
                             };
-                            vocab.save(&vocab_entry)?;
+                            vocab_db.save(&vocab_entry)?;
                             println!("✓ Gespeichert: {}", vocab_entry.lemma);
                         }
                         None => println!("Usage: /vocab save <word>"),
                     },
                     Some("list") => {
-                        let vocab_list = vocab.list()?;
+                        let vocab_list = vocab_db.list()?;
                         if vocab_list.is_empty() {
                             println!("Keine Wörter gespeichert.")
                         } else {
@@ -240,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let message = Message::new("user", user_input);
             history.push(message);
 
-            let response = call_api(&client, &api_key, &history).await?;
+            let response = call_api(&client, &api_key, &history, &system_prompt).await?;
             println!("Lehrer: {}", response);
             let message = Message::new("assistant", &response);
             history.push(message);

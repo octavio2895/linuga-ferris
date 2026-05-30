@@ -9,3 +9,4 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
+clap = { version = "4", features = ["derive"]}
