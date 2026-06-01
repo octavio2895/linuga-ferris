@@ -1,4 +1,4 @@
-use crate::LinguaError;
+use crate::error::LinguaError;
 
 #[derive(Debug)]
 pub struct VocabEntry {
