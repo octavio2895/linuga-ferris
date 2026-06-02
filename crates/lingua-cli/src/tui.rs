@@ -19,95 +19,66 @@ use lingua_core::{
     VocabEntry,
 };
 
-pub trait Command {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError>;
+fn handle_help_command(app: &mut App) -> Result<(), LinguaError> {
+    println!("/quit - Program beenden");
+    println!("/help - Befehle anzeigen");
+    Ok(())
 }
 
-pub struct QuitCommand;
-pub struct HelpCommand;
-pub struct VocabSaveCommand {
-    pub word: String,
-}
-pub struct VocabListCommand;
-pub struct SendMessageCommand {
-    pub text: String,
-}
-pub struct ErrorCommand {
-    pub error_msg: String,
-}
-
-impl Command for QuitCommand {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
-        app.should_quit = true;
-        Ok(())
-    }
+fn handle_vocab_save(app: &mut App, word: String) -> Result<(), LinguaError> {
+    let context = app.history.last().map(|m| m.content.as_str()).unwrap_or("");
+    let entry = app.lemmatizer.lemmatize(&word, context);
+    let vocab_entry = VocabEntry {
+        lemma: entry.lemma,
+        pos: entry.pos,
+        source_form: word.clone(),
+        translation: None,
+        context: Some(context.to_string()),
+    };
+    app.vocab_db.save(&vocab_entry)?;
+    app.status = format!("✓ Gespeichert: {}", vocab_entry.lemma);
+    Ok(())
 }
 
-impl Command for HelpCommand {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
-        println!("/quit - Program beenden");
-        println!("/help - Befehle anzeigen");
-        Ok(())
-    }
-}
-
-impl Command for VocabSaveCommand {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
-        let context = app.history.last().map(|m| m.content.as_str()).unwrap_or("");
-        let entry = app.lemmatizer.lemmatize(&self.word, context);
-        let vocab_entry = VocabEntry {
-            lemma: entry.lemma,
-            pos: entry.pos,
-            source_form: self.word.clone(),
-            translation: None,
-            context: Some(context.to_string()),
-        };
-        app.vocab_db.save(&vocab_entry)?;
-        app.status = format!("✓ Gespeichert: {}", vocab_entry.lemma);
-        Ok(())
-    }
-}
-
-impl Command for VocabListCommand {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
-        let vocab_list = app.vocab_db.list()?;
-        if vocab_list.is_empty() {
-            app.status = format!("Keine Wörter gespeichert.")
-        } else {
-            app.status = format!("\n--- Vokcabelliste ({} Wörter) ---", vocab_list.len());
-            for entry in &vocab_list {
-                println!(
-                    "  {:<20} ({}) - {}",
-                    entry.lemma,
-                    entry.pos,
-                    entry.translation.as_deref().unwrap_or("_")
-                );
-            }
+fn hanlde_vocab_list(app: &mut App) -> Result<(), LinguaError> {
+    let vocab_list = app.vocab_db.list()?;
+    if vocab_list.is_empty() {
+        app.status = format!("Keine Wörter gespeichert.")
+    } else {
+        app.status = format!("\n--- Vokcabelliste ({} Wörter) ---", vocab_list.len());
+        for entry in &vocab_list {
+            println!(
+                "  {:<20} ({}) - {}",
+                entry.lemma,
+                entry.pos,
+                entry.translation.as_deref().unwrap_or("_")
+            );
         }
-        Ok(())
     }
+    Ok(())
 }
 
-impl Command for SendMessageCommand {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
-        // Fallthrough, could be a useful hook.
-        Ok(())
-    }
+fn handle_send_message(app: &mut App, text: String) -> Result<(), LinguaError> {
+    app.msg_requested = true;
+    app.waiting = true;
+    app.history.push(Message::new("user", &text));
+    app.input.clear();
+    app.status = "Warte auf Antwort...".to_string();
+    Ok(())
 }
 
-impl Command for ErrorCommand {
-    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
-        // Fallthrough, could be a useful hook.
-        Ok(())
-    }
+fn handle_error_command(app: &mut App, error_msg: String) -> Result<(), LinguaError> {
+    // Fallthrough, could be a useful hook.
+    Ok(())
 }
 
-enum Commands {
+enum CommandsKind {
     Quit,
     Help,
     VocabSave(String),
     VocabLlist,
     Message(String),
+    Error(String),
 }
 
 use tokio::sync::mpsc;
@@ -124,41 +95,30 @@ pub struct App {
     api_key: String,
     client: reqwest::Client,
     should_quit: bool,
+    msg_requested: bool,
 }
 
-fn handle_commands(input: &str) -> Box<dyn Command> {
+fn handle_commands(input: &str) -> CommandsKind {
     let input_trimmed = input.trim();
 
     if input_trimmed.starts_with('/') {
         let parts: Vec<&str> = input_trimmed.splitn(3, ' ').collect();
         match parts[0] {
-            "/quit" => Box::new(QuitCommand),
-            "/help" => Box::new(HelpCommand),
+            "/quit" => CommandsKind::Quit,
+            "/help" => CommandsKind::Help,
             "/vocab" => match parts.get(1).copied() {
                 Some("save") => match parts.get(2).copied() {
-                    Some(word) => Box::new(VocabSaveCommand {
-                        word: word.to_string(),
-                    }),
-                    None => Box::new(ErrorCommand {
-                        error_msg: "Usage: /vocab save <word>".to_string(),
-                    }),
+                    Some(word) => CommandsKind::VocabSave(word.to_string()),
+                    None => CommandsKind::Error("Usage: /vocab save <word>".to_string()),
                 },
-                Some("list") => Box::new(VocabListCommand),
-                Some(other) => Box::new(ErrorCommand {
-                    error_msg: format!("Unknown /vocab command: {}", other),
-                }),
-                None => Box::new(ErrorCommand {
-                    error_msg: "Usage: /vocab <save|list>".to_string(),
-                }),
+                Some("list") => CommandsKind::VocabLlist,
+                Some(other) => CommandsKind::Error(format!("Unknown /vocab command: {}", other)),
+                None => CommandsKind::Error("Usage: /vocab <save|list>".to_string()),
             },
-            text => Box::new(ErrorCommand {
-                error_msg: format!("Unknown command: {}", text),
-            }),
+            text => CommandsKind::Error(format!("Unknown command: {}", text)),
         }
     } else {
-        Box::new(SendMessageCommand {
-            text: input_trimmed.to_string(),
-        })
+        CommandsKind::Message(input_trimmed.to_string())
     }
 }
 
@@ -256,16 +216,16 @@ pub async fn run(
         api_key,
         client,
         should_quit: false,
+        msg_requested: false,
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
-    let mut msg_requested = false;
     loop {
         terminal.draw(|frame| {
             draw(frame, &app);
         })?;
 
-        if app.waiting && msg_requested {
+        if app.waiting && app.msg_requested {
             let api_key_clone = app.api_key.clone();
             let history_clone = app.history.clone();
             let system_prompt_clone = app.system_prompt.clone();
@@ -281,10 +241,10 @@ pub async fn run(
                 .await;
                 tx_clone.send(result).await.ok();
             });
-            msg_requested = false;
+            app.msg_requested = false;
         }
 
-        if app.waiting && !msg_requested {
+        if app.waiting && !app.msg_requested {
             if let Ok(result) = rx.try_recv() {
                 match result {
                     Ok(response) => {
@@ -302,15 +262,21 @@ pub async fn run(
         if crossterm::event::poll(std::time::Duration::from_millis(100))? {
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 match key.code {
-                    crossterm::event::KeyCode::Esc => break,
+                    crossterm::event::KeyCode::Esc => app.should_quit = true,
                     crossterm::event::KeyCode::Enter => {
-                        if !app.waiting {
-                            msg_requested = true;
-                            app.waiting = true;
+                        if !app.waiting && !app.input.is_empty() {
                             let text = app.input.clone();
-                            app.history.push(Message::new("user", &text));
+                            match handle_commands(&text) {
+                                CommandsKind::Quit => app.should_quit = true,
+                                CommandsKind::VocabSave(word) => handle_vocab_save(&mut app, word)?,
+                                CommandsKind::VocabLlist => hanlde_vocab_list(&mut app)?,
+                                CommandsKind::Help => handle_help_command(&mut app)?,
+                                CommandsKind::Message(text) => handle_send_message(&mut app, text)?,
+                                CommandsKind::Error(error_msg) => {
+                                    handle_error_command(&mut app, error_msg)?
+                                }
+                            }
                             app.input.clear();
-                            app.status = "Warte auf Antwort...".to_string();
                         }
                     }
                     crossterm::event::KeyCode::Char(c) => {
@@ -320,6 +286,9 @@ pub async fn run(
                         app.input.pop();
                     }
                     _ => {}
+                }
+                if app.should_quit {
+                    break;
                 }
             }
         }
