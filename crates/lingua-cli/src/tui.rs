@@ -4,6 +4,7 @@ use crossterm::{
     ExecutableCommand,
 };
 
+use dotenvy::Error;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -18,6 +19,97 @@ use lingua_core::{
     VocabEntry,
 };
 
+pub trait Command {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError>;
+}
+
+pub struct QuitCommand;
+pub struct HelpCommand;
+pub struct VocabSaveCommand {
+    pub word: String,
+}
+pub struct VocabListCommand;
+pub struct SendMessageCommand {
+    pub text: String,
+}
+pub struct ErrorCommand {
+    pub error_msg: String,
+}
+
+impl Command for QuitCommand {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
+        app.should_quit = true;
+        Ok(())
+    }
+}
+
+impl Command for HelpCommand {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
+        println!("/quit - Program beenden");
+        println!("/help - Befehle anzeigen");
+        Ok(())
+    }
+}
+
+impl Command for VocabSaveCommand {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
+        let context = app.history.last().map(|m| m.content.as_str()).unwrap_or("");
+        let entry = app.lemmatizer.lemmatize(&self.word, context);
+        let vocab_entry = VocabEntry {
+            lemma: entry.lemma,
+            pos: entry.pos,
+            source_form: self.word.clone(),
+            translation: None,
+            context: Some(context.to_string()),
+        };
+        app.vocab_db.save(&vocab_entry)?;
+        app.status = format!("✓ Gespeichert: {}", vocab_entry.lemma);
+        Ok(())
+    }
+}
+
+impl Command for VocabListCommand {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
+        let vocab_list = app.vocab_db.list()?;
+        if vocab_list.is_empty() {
+            app.status = format!("Keine Wörter gespeichert.")
+        } else {
+            app.status = format!("\n--- Vokcabelliste ({} Wörter) ---", vocab_list.len());
+            for entry in &vocab_list {
+                println!(
+                    "  {:<20} ({}) - {}",
+                    entry.lemma,
+                    entry.pos,
+                    entry.translation.as_deref().unwrap_or("_")
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Command for SendMessageCommand {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
+        // Fallthrough, could be a useful hook.
+        Ok(())
+    }
+}
+
+impl Command for ErrorCommand {
+    fn execute(&mut self, app: &mut App) -> Result<(), LinguaError> {
+        // Fallthrough, could be a useful hook.
+        Ok(())
+    }
+}
+
+enum Commands {
+    Quit,
+    Help,
+    VocabSave(String),
+    VocabLlist,
+    Message(String),
+}
+
 use tokio::sync::mpsc;
 
 pub struct App {
@@ -31,64 +123,42 @@ pub struct App {
     waiting: bool,
     api_key: String,
     client: reqwest::Client,
+    should_quit: bool,
 }
 
-fn handle_commands(input: &str) {
+fn handle_commands(input: &str) -> Box<dyn Command> {
     let input_trimmed = input.trim();
 
     if input_trimmed.starts_with('/') {
         let parts: Vec<&str> = input_trimmed.splitn(3, ' ').collect();
         match parts[0] {
-            "/quit" => {
-                println!("Tschüss!");
-                break;
-            }
-            "/help" => {
-                println!("/quit - Program beenden");
-                println!("/help - Befehle anzeigen");
-            }
+            "/quit" => Box::new(QuitCommand),
+            "/help" => Box::new(HelpCommand),
             "/vocab" => match parts.get(1).copied() {
                 Some("save") => match parts.get(2).copied() {
-                    Some(word) => {
-                        let context = history.last().map(|m| m.content.as_str()).unwrap_or("");
-                        let entry = lemmatizer.lemmatize(parts[2], context);
-                        let vocab_entry = VocabEntry {
-                            lemma: entry.lemma,
-                            pos: entry.pos,
-                            source_form: word.to_string(),
-                            translation: None,
-                            context: Some(context.to_string()),
-                        };
-                        vocab_db.save(&vocab_entry)?;
-                        println!("✓ Gespeichert: {}", vocab_entry.lemma);
-                    }
-                    None => println!("Usage: /vocab save <word>"),
+                    Some(word) => Box::new(VocabSaveCommand {
+                        word: word.to_string(),
+                    }),
+                    None => Box::new(ErrorCommand {
+                        error_msg: "Usage: /vocab save <word>".to_string(),
+                    }),
                 },
-                Some("list") => {
-                    let vocab_list = vocab_db.list()?;
-                    if vocab_list.is_empty() {
-                        println!("Keine Wörter gespeichert.")
-                    } else {
-                        println!("\n--- Vokcabelliste ({} Wörter) ---", vocab_list.len());
-                        for entry in &vocab_list {
-                            println!(
-                                "  {:<20} ({}) - {}",
-                                entry.lemma,
-                                entry.pos,
-                                entry.translation.as_deref().unwrap_or("_")
-                            );
-                        }
-                    }
-                }
-                Some(other) => {
-                    println!("Unknown /vocab command: {}", other);
-                }
-                None => println!("Usage: /vocab <save|list>"),
+                Some("list") => Box::new(VocabListCommand),
+                Some(other) => Box::new(ErrorCommand {
+                    error_msg: format!("Unknown /vocab command: {}", other),
+                }),
+                None => Box::new(ErrorCommand {
+                    error_msg: "Usage: /vocab <save|list>".to_string(),
+                }),
             },
-            text => {
-                println!("Unknown command: {}", text);
-            }
+            text => Box::new(ErrorCommand {
+                error_msg: format!("Unknown command: {}", text),
+            }),
         }
+    } else {
+        Box::new(SendMessageCommand {
+            text: input_trimmed.to_string(),
+        })
     }
 }
 
@@ -185,6 +255,7 @@ pub async fn run(
         waiting: false,
         api_key,
         client,
+        should_quit: false,
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
