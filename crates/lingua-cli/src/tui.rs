@@ -44,7 +44,7 @@ fn handle_vocab_list(app: &mut App) -> Result<(), LinguaError> {
     if vocab_list.is_empty() {
         app.status = format!("Keine Wörter gespeichert.")
     } else {
-        let mut lines = format!("--- Vokcabelliste ({} Wörter) ---\n", vocab_list.len());
+        let mut lines = format!("\n--- Vokcabelliste ({} Wörter) ---\n", vocab_list.len());
         for entry in &vocab_list {
             lines.push_str(&format!(
                 "  {:<20} ({}) - {}\n",
@@ -98,6 +98,7 @@ pub struct App {
     msg_requested: bool,
     pub scroll: usize,
     display_messages: Vec<Message>,
+    pub scroll_to_bottom: bool,
 }
 
 fn handle_commands(input: &str) -> CommandsKind {
@@ -124,7 +125,7 @@ fn handle_commands(input: &str) -> CommandsKind {
     }
 }
 
-fn draw(frame: &mut ratatui::Frame, app: &App) {
+fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -146,7 +147,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
             };
 
             msg.content
-                .lines()
+                .trim_end_matches('\n')
+                .split('\n')
                 .enumerate()
                 .map(|(i, line)| {
                     let prefix = if i == 0 { label } else { "    " };
@@ -172,6 +174,16 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         .wrap(Wrap { trim: false })
         .scroll((app.scroll as u16, 0));
     // .scroll((app.scroll as u16, 0));
+
+    if app.scroll_to_bottom {
+        app.scroll = chat_widget.line_count(chunks[0].width).saturating_sub(3);
+        app.scroll_to_bottom = false;
+    }
+    app.status = format!(
+        "width: {}, scroll : {}",
+        chat_widget.line_count(chunks[0].width),
+        app.scroll
+    );
 
     let input_widget = Paragraph::new(app.input.as_str()).block(
         Block::default()
@@ -231,12 +243,13 @@ pub async fn run(
         msg_requested: false,
         scroll: 0,
         display_messages: Vec::new(),
+        scroll_to_bottom: false,
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
     loop {
         terminal.draw(|frame| {
-            draw(frame, &app);
+            draw(frame, &mut app);
         })?;
 
         if app.msg_requested {
@@ -257,6 +270,7 @@ pub async fn run(
             });
             app.msg_requested = false;
             app.waiting = true;
+            app.scroll_to_bottom = true;
         }
 
         if app.waiting {
@@ -266,7 +280,6 @@ pub async fn run(
                         app.history.push(Message::new("assistant", &response));
                         app.display_messages
                             .push(Message::new("assistant", &response));
-                        app.scroll = app.display_messages.len().saturating_sub(1);
                         app.status.clear();
                     }
                     Err(e) => {
