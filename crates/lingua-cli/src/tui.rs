@@ -7,7 +7,7 @@ use crossterm::{
 use dotenvy::Error;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
@@ -81,6 +81,99 @@ enum CommandsKind {
     Error(String),
 }
 
+fn build_message_lines(message: &Message) -> Vec<Line<'_>> {
+    let (label, color) = match message.role.as_str() {
+        "user" => ("Du:    ", Color::Green),
+        "assistant" => ("Lehrer:    ", Color::Cyan),
+        "ferris" => ("Ferris: ", Color::Yellow),
+        _ => ("    ", Color::White),
+    };
+
+    let lines = message
+        .content
+        .trim_end_matches('\n')
+        .split('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            let prefix = if i == 0 { label } else { "    " };
+            Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(line.to_string()),
+            ])
+        })
+        .collect::<Vec<_>>();
+    lines
+}
+
+fn message_height(msg: &Message, width: u16) -> u16 {
+    let inner_width = width.saturating_sub(2);
+    let lines = build_message_lines(&msg);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    para.line_count(inner_width) as u16 + 2
+}
+
+fn draw_messages(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let width = area.width;
+    let viewport_height = area.height;
+    app.viewport_height = viewport_height as u32;
+
+    let mut y_offset: i32 = -(app.scroll as i32);
+    let mut total_height: u32 = 0;
+
+    for (i, msg) in app.display_messages.iter().enumerate() {
+        let height = message_height(msg, width) as i32;
+        total_height += height as u32;
+
+        let msg_top = y_offset;
+        let msg_bottom = y_offset + height;
+
+        if msg_bottom > 0 && msg_top < viewport_height as i32 {
+            let render_y = area.y as i32 + msg_top;
+            let clip_top = render_y.max(area.y as i32);
+            let clip_bottom = (render_y + height).min((area.y + viewport_height) as i32);
+
+            if clip_bottom > clip_top {
+                let rect = Rect {
+                    x: area.x,
+                    y: clip_top as u16,
+                    width,
+                    height: (clip_bottom - clip_top) as u16,
+                };
+                let is_selected = app.selected_message == Some(i);
+                let block = if is_selected {
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .border_type(BorderType::Rounded)
+                } else {
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Gray))
+                        .border_type(BorderType::Rounded)
+                };
+
+                let lines = build_message_lines(msg);
+                let para = Paragraph::new(lines)
+                    .block(block)
+                    .wrap(Wrap { trim: false });
+                frame.render_widget(para, rect);
+            }
+        }
+        y_offset += height;
+    }
+    app.total_content_height = total_height as usize;
+}
+
+fn compute_total_height(messages: &[Message], width: u16) -> usize {
+    messages
+        .iter()
+        .map(|msg| message_height(msg, width) as usize)
+        .sum()
+}
+
 use tokio::sync::mpsc;
 
 pub struct App {
@@ -99,6 +192,9 @@ pub struct App {
     pub scroll: usize,
     display_messages: Vec<Message>,
     pub scroll_to_bottom: bool,
+    total_content_height: usize,
+    viewport_height: u32,
+    selected_message: Option<usize>,
 }
 
 fn handle_commands(input: &str) -> CommandsKind {
@@ -135,55 +231,32 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    let display_lines: Vec<Line> = app
-        .display_messages
-        .iter()
-        .flat_map(|msg| {
-            let (label, color) = match msg.role.as_str() {
-                "user" => ("Du:    ", Color::Green),
-                "assistant" => ("Lehrer:    ", Color::Cyan),
-                "ferris" => ("Ferris: ", Color::Yellow),
-                _ => ("    ", Color::White),
-            };
+    let outer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title("Lingua Ferris 🦀");
+    let inner_area = outer_block.inner(chunks[0]);
+    frame.render_widget(outer_block, chunks[0]);
 
-            msg.content
-                .trim_end_matches('\n')
-                .split('\n')
-                .enumerate()
-                .map(|(i, line)| {
-                    let prefix = if i == 0 { label } else { "    " };
-                    Line::from(vec![
-                        Span::styled(
-                            prefix,
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(line.to_string()),
-                    ])
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let inner_height = inner_area.height as usize;
+    let total_height = compute_total_height(&app.display_messages, inner_area.width);
 
-    let chat_widget = Paragraph::new(display_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .title(" Lingua Ferris :crab: "),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll as u16, 0));
-    // .scroll((app.scroll as u16, 0));
+    app.total_content_height = total_height;
+    app.viewport_height = inner_height as u32;
 
     if app.scroll_to_bottom {
-        app.scroll = chat_widget.line_count(chunks[0].width).saturating_sub(3);
+        app.scroll = total_height.saturating_sub(1);
         app.scroll_to_bottom = false;
     }
     app.status = format!(
-        "width: {}, scroll : {}",
-        chat_widget.line_count(chunks[0].width),
-        app.scroll
+        "viewport_height: {}, scroll : {}, total_height: {}",
+        app.viewport_height, app.scroll, total_height,
     );
+
+    let max_scroll = total_height.saturating_sub(inner_height);
+    app.scroll = app.scroll.min(max_scroll);
+
+    draw_messages(frame, app, inner_area);
 
     let input_widget = Paragraph::new(app.input.as_str()).block(
         Block::default()
@@ -196,7 +269,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let status_widget =
         Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray));
 
-    frame.render_widget(chat_widget, chunks[0]);
+    // frame.render_widget(chat_widget, chunks[0]);
     frame.render_widget(input_widget, chunks[1]);
     frame.render_widget(status_widget, chunks[2]);
 }
@@ -244,6 +317,9 @@ pub async fn run(
         scroll: 0,
         display_messages: Vec::new(),
         scroll_to_bottom: false,
+        total_content_height: 0,
+        viewport_height: 0,
+        selected_message: None,
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
@@ -270,7 +346,7 @@ pub async fn run(
             });
             app.msg_requested = false;
             app.waiting = true;
-            app.scroll_to_bottom = true;
+            // app.scroll_to_bottom = true;
         }
 
         if app.waiting {
@@ -320,7 +396,27 @@ pub async fn run(
                         app.scroll = app.scroll.saturating_sub(1);
                     }
                     crossterm::event::KeyCode::Down => {
-                        app.scroll += 1;
+                        let max_scroll = app
+                            .total_content_height
+                            .saturating_sub(app.viewport_height as usize);
+                        app.scroll = (app.scroll + 1).min(max_scroll);
+                    }
+                    crossterm::event::KeyCode::Tab => {
+                        let len = app.display_messages.len();
+                        if len > 0 {
+                            app.selected_message =
+                                Some(app.selected_message.map(|i| (i + 1) % len).unwrap_or(0));
+                        }
+                    }
+                    crossterm::event::KeyCode::BackTab => {
+                        let len = app.display_messages.len();
+                        if len > 0 {
+                            app.selected_message = Some(
+                                app.selected_message
+                                    .map(|i| if i == 0 { len - 1 } else { i - 1 })
+                                    .unwrap_or(len - 1),
+                            )
+                        };
                     }
                     _ => {}
                 }
