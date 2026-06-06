@@ -20,8 +20,7 @@ use lingua_core::{
 };
 
 fn handle_help_command(app: &mut App) -> Result<(), LinguaError> {
-    println!("/quit - Program beenden");
-    println!("/help - Befehle anzeigen");
+    app.status = "/quit  /vocab save <word>  /vocab list  Esc=beenden".to_string();
     Ok(())
 }
 
@@ -40,35 +39,35 @@ fn handle_vocab_save(app: &mut App, word: String) -> Result<(), LinguaError> {
     Ok(())
 }
 
-fn hanlde_vocab_list(app: &mut App) -> Result<(), LinguaError> {
+fn handle_vocab_list(app: &mut App) -> Result<(), LinguaError> {
     let vocab_list = app.vocab_db.list()?;
     if vocab_list.is_empty() {
         app.status = format!("Keine Wörter gespeichert.")
     } else {
-        app.status = format!("\n--- Vokcabelliste ({} Wörter) ---", vocab_list.len());
+        let mut lines = format!("--- Vokcabelliste ({} Wörter) ---\n", vocab_list.len());
         for entry in &vocab_list {
-            println!(
-                "  {:<20} ({}) - {}",
+            lines.push_str(&format!(
+                "  {:<20} ({}) - {}\n",
                 entry.lemma,
                 entry.pos,
                 entry.translation.as_deref().unwrap_or("_")
-            );
+            ));
         }
+        app.history.push(Message::new("ferris", &lines));
+        app.status = format!("{} Wörter geladen", vocab_list.len());
     }
     Ok(())
 }
 
 fn handle_send_message(app: &mut App, text: String) -> Result<(), LinguaError> {
     app.msg_requested = true;
-    app.waiting = true;
     app.history.push(Message::new("user", &text));
-    app.input.clear();
     app.status = "Warte auf Antwort...".to_string();
     Ok(())
 }
 
 fn handle_error_command(app: &mut App, error_msg: String) -> Result<(), LinguaError> {
-    // Fallthrough, could be a useful hook.
+    app.status = error_msg;
     Ok(())
 }
 
@@ -76,7 +75,7 @@ enum CommandsKind {
     Quit,
     Help,
     VocabSave(String),
-    VocabLlist,
+    VocabList,
     Message(String),
     Error(String),
 }
@@ -96,6 +95,7 @@ pub struct App {
     client: reqwest::Client,
     should_quit: bool,
     msg_requested: bool,
+    pub scroll: usize,
 }
 
 fn handle_commands(input: &str) -> CommandsKind {
@@ -111,7 +111,7 @@ fn handle_commands(input: &str) -> CommandsKind {
                     Some(word) => CommandsKind::VocabSave(word.to_string()),
                     None => CommandsKind::Error("Usage: /vocab save <word>".to_string()),
                 },
-                Some("list") => CommandsKind::VocabLlist,
+                Some("list") => CommandsKind::VocabList,
                 Some(other) => CommandsKind::Error(format!("Unknown /vocab command: {}", other)),
                 None => CommandsKind::Error("Usage: /vocab <save|list>".to_string()),
             },
@@ -135,19 +135,28 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
     let history_lines: Vec<Line> = app
         .history
         .iter()
-        .map(|msg| {
+        .flat_map(|msg| {
             let (label, color) = match msg.role.as_str() {
                 "user" => ("Du:    ", Color::Green),
                 "assistant" => ("Lehrer:    ", Color::Cyan),
-                _ => ("system:    ", Color::White),
+                "ferris" => ("Ferris: ", Color::Yellow),
+                _ => ("    ", Color::White),
             };
-            Line::from(vec![
-                Span::styled(
-                    label,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(msg.content.clone()),
-            ])
+
+            msg.content
+                .lines()
+                .enumerate()
+                .map(|(i, line)| {
+                    let prefix = if i == 0 { label } else { "    " };
+                    Line::from(vec![
+                        Span::styled(
+                            prefix,
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(line.to_string()),
+                    ])
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 
@@ -158,7 +167,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
                 .border_type(BorderType::Rounded)
                 .title(" Lingua Ferris :crab: "),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((app.scroll as u16, 0));
     // .scroll((app.scroll as u16, 0));
 
     let input_widget = Paragraph::new(app.input.as_str()).block(
@@ -217,6 +227,7 @@ pub async fn run(
         client,
         should_quit: false,
         msg_requested: false,
+        scroll: 0,
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
@@ -225,7 +236,7 @@ pub async fn run(
             draw(frame, &app);
         })?;
 
-        if app.waiting && app.msg_requested {
+        if app.msg_requested {
             let api_key_clone = app.api_key.clone();
             let history_clone = app.history.clone();
             let system_prompt_clone = app.system_prompt.clone();
@@ -242,20 +253,22 @@ pub async fn run(
                 tx_clone.send(result).await.ok();
             });
             app.msg_requested = false;
+            app.waiting = true;
         }
 
-        if app.waiting && !app.msg_requested {
+        if app.waiting {
             if let Ok(result) = rx.try_recv() {
                 match result {
                     Ok(response) => {
                         app.history.push(Message::new("assistant", &response));
+                        app.scroll = app.history.len().saturating_sub(1);
+                        app.status.clear();
                     }
                     Err(e) => {
                         app.status = format!("Error: {}", e);
                     }
                 }
                 app.waiting = false;
-                app.status.clear();
             }
         }
 
@@ -269,7 +282,7 @@ pub async fn run(
                             match handle_commands(&text) {
                                 CommandsKind::Quit => app.should_quit = true,
                                 CommandsKind::VocabSave(word) => handle_vocab_save(&mut app, word)?,
-                                CommandsKind::VocabLlist => hanlde_vocab_list(&mut app)?,
+                                CommandsKind::VocabList => handle_vocab_list(&mut app)?,
                                 CommandsKind::Help => handle_help_command(&mut app)?,
                                 CommandsKind::Message(text) => handle_send_message(&mut app, text)?,
                                 CommandsKind::Error(error_msg) => {
@@ -284,6 +297,12 @@ pub async fn run(
                     }
                     crossterm::event::KeyCode::Backspace => {
                         app.input.pop();
+                    }
+                    crossterm::event::KeyCode::Up => {
+                        app.scroll = app.scroll.saturating_sub(1);
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        app.scroll += 1;
                     }
                     _ => {}
                 }
