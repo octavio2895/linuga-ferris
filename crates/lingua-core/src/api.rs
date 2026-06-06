@@ -1,4 +1,4 @@
-use crate::error::LinguaError;
+use crate::{error::LinguaError, SessionConfig};
 
 #[derive(serde::Serialize, Clone)]
 pub struct Message {
@@ -37,18 +37,12 @@ async fn call_api(
     client: &reqwest::Client,
     api_key: &str,
     history: &[Message],
-    system: &str,
+    config: &SessionConfig,
 ) -> Result<String, LinguaError> {
-    // let api_history: Vec<Message> = history
-    //     .iter()
-    //     .filter(|m| m.role == "user" || m.role == "assistant")
-    //     .cloned()
-    //     .collect();
-    //
     let request_body = ApiRequest {
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 1024,
-        system,
+        max_tokens: config.max_tokens,
+        system: &config.build_system_prompt(),
         messages: history,
     };
 
@@ -75,12 +69,12 @@ pub async fn call_api_with_retry(
     client: &reqwest::Client,
     api_key: &str,
     history: &[Message],
-    system: &str,
+    config: &SessionConfig,
 ) -> Result<String, LinguaError> {
     let mut delay = std::time::Duration::from_millis(500);
 
     for attempt in 1..=3 {
-        match call_api(client, api_key, history, system).await {
+        match call_api(client, api_key, history, config).await {
             Ok(response) => return Ok(response),
             Err(LinguaError::Api(e)) if attempt < 3 => {
                 eprintln!(

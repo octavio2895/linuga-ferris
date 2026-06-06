@@ -1,10 +1,8 @@
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 
-use dotenvy::Error;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -42,7 +40,7 @@ fn handle_vocab_save(app: &mut App, word: String) -> Result<(), LinguaError> {
 fn handle_vocab_list(app: &mut App) -> Result<(), LinguaError> {
     let vocab_list = app.vocab_db.list()?;
     if vocab_list.is_empty() {
-        app.status = format!("Keine Wörter gespeichert.")
+        app.status = "Keine Wörter gespeichert.".to_string();
     } else {
         let mut lines = format!("\n--- Vokcabelliste ({} Wörter) ---\n", vocab_list.len());
         for entry in &vocab_list {
@@ -110,7 +108,7 @@ fn build_message_lines(message: &Message) -> Vec<Line<'_>> {
 
 fn message_height(msg: &Message, width: u16) -> u16 {
     let inner_width = width.saturating_sub(2);
-    let lines = build_message_lines(&msg);
+    let lines = build_message_lines(msg);
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     para.line_count(inner_width) as u16 + 2
 }
@@ -122,6 +120,22 @@ fn draw_messages(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
     let mut y_offset: i32 = -(app.scroll as i32);
     let mut total_height: u32 = 0;
+
+    if let Some(target_idx) = app.scroll_to_message.take() {
+        let target_y: usize = app
+            .display_messages
+            .iter()
+            .take(target_idx)
+            .map(|msg| message_height(msg, area.width) as usize)
+            .sum();
+
+        let target_height = message_height(&app.display_messages[target_idx], area.width) as usize;
+        if target_y < app.scroll {
+            app.scroll = target_y;
+        } else if target_y + target_height > app.scroll + area.height as usize {
+            app.scroll = (target_y + target_height).saturating_sub(area.height as usize);
+        }
+    }
 
     for (i, msg) in app.display_messages.iter().enumerate() {
         let height = message_height(msg, width) as i32;
@@ -182,19 +196,19 @@ pub struct App {
     vocab_db: VocabDb,
     lemmatizer: NaiveLemmatizer,
     config: SessionConfig,
-    system_prompt: String,
     status: String,
     waiting: bool,
     api_key: String,
     client: reqwest::Client,
     should_quit: bool,
     msg_requested: bool,
-    pub scroll: usize,
+    scroll: usize,
     display_messages: Vec<Message>,
-    pub scroll_to_bottom: bool,
+    scroll_to_bottom: bool,
     total_content_height: usize,
     viewport_height: u32,
     selected_message: Option<usize>,
+    scroll_to_message: Option<usize>,
 }
 
 fn handle_commands(input: &str) -> CommandsKind {
@@ -245,13 +259,13 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     app.viewport_height = inner_height as u32;
 
     if app.scroll_to_bottom {
-        app.scroll = total_height.saturating_sub(1);
+        app.scroll = total_height.saturating_sub(inner_height);
         app.scroll_to_bottom = false;
     }
-    app.status = format!(
-        "viewport_height: {}, scroll : {}, total_height: {}",
-        app.viewport_height, app.scroll, total_height,
-    );
+    // app.status = format!(
+    //     "inner_height: {}, scroll : {}, total_height: {}",
+    //     inner_height, app.scroll, total_height,
+    // );
 
     let max_scroll = total_height.saturating_sub(inner_height);
     app.scroll = app.scroll.min(max_scroll);
@@ -269,7 +283,6 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let status_widget =
         Paragraph::new(app.status.as_str()).style(Style::default().fg(Color::DarkGray));
 
-    // frame.render_widget(chat_widget, chunks[0]);
     frame.render_widget(input_widget, chunks[1]);
     frame.render_widget(status_widget, chunks[2]);
 }
@@ -280,12 +293,6 @@ pub async fn run(
     vocab_db: VocabDb,
     client: reqwest::Client,
 ) -> Result<(), LinguaError> {
-    // setup terminal
-    // create App
-    // event loop
-    // teardown terminal
-
-    // setup
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
@@ -298,16 +305,12 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let system_prompt = config.build_system_prompt();
-
-    // create App
     let mut app = App {
         history: Vec::new(),
         input: String::new(),
         vocab_db,
         lemmatizer: NaiveLemmatizer,
         config,
-        system_prompt,
         status: String::new(),
         waiting: false,
         api_key,
@@ -320,6 +323,7 @@ pub async fn run(
         total_content_height: 0,
         viewport_height: 0,
         selected_message: None,
+        scroll_to_message: None,
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
@@ -331,22 +335,22 @@ pub async fn run(
         if app.msg_requested {
             let api_key_clone = app.api_key.clone();
             let history_clone = app.history.clone();
-            let system_prompt_clone = app.system_prompt.clone();
             let tx_clone = tx.clone();
             let client_clone = app.client.clone();
+            let session_config_clone = app.config.clone();
             tokio::spawn(async move {
                 let result = call_api_with_retry(
                     &client_clone,
                     &api_key_clone,
                     &history_clone,
-                    &system_prompt_clone,
+                    &session_config_clone,
                 )
                 .await;
                 tx_clone.send(result).await.ok();
             });
             app.msg_requested = false;
             app.waiting = true;
-            // app.scroll_to_bottom = true;
+            app.scroll_to_bottom = true;
         }
 
         if app.waiting {
@@ -356,6 +360,7 @@ pub async fn run(
                         app.history.push(Message::new("assistant", &response));
                         app.display_messages
                             .push(Message::new("assistant", &response));
+                        app.scroll_to_bottom = true;
                         app.status.clear();
                     }
                     Err(e) => {
@@ -370,21 +375,19 @@ pub async fn run(
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 match key.code {
                     crossterm::event::KeyCode::Esc => app.should_quit = true,
-                    crossterm::event::KeyCode::Enter => {
-                        if !app.waiting && !app.input.is_empty() {
-                            let text = app.input.clone();
-                            match handle_commands(&text) {
-                                CommandsKind::Quit => app.should_quit = true,
-                                CommandsKind::VocabSave(word) => handle_vocab_save(&mut app, word)?,
-                                CommandsKind::VocabList => handle_vocab_list(&mut app)?,
-                                CommandsKind::Help => handle_help_command(&mut app)?,
-                                CommandsKind::Message(text) => handle_send_message(&mut app, text)?,
-                                CommandsKind::Error(error_msg) => {
-                                    handle_error_command(&mut app, error_msg)?
-                                }
+                    crossterm::event::KeyCode::Enter if !app.waiting && !app.input.is_empty() => {
+                        let text = app.input.clone();
+                        match handle_commands(&text) {
+                            CommandsKind::Quit => app.should_quit = true,
+                            CommandsKind::VocabSave(word) => handle_vocab_save(&mut app, word)?,
+                            CommandsKind::VocabList => handle_vocab_list(&mut app)?,
+                            CommandsKind::Help => handle_help_command(&mut app)?,
+                            CommandsKind::Message(text) => handle_send_message(&mut app, text)?,
+                            CommandsKind::Error(error_msg) => {
+                                handle_error_command(&mut app, error_msg)?
                             }
-                            app.input.clear();
                         }
+                        app.input.clear();
                     }
                     crossterm::event::KeyCode::Char(c) => {
                         app.input.push(c);
@@ -406,6 +409,7 @@ pub async fn run(
                         if len > 0 {
                             app.selected_message =
                                 Some(app.selected_message.map(|i| (i + 1) % len).unwrap_or(0));
+                            app.scroll_to_message = app.selected_message;
                         }
                     }
                     crossterm::event::KeyCode::BackTab => {
@@ -415,7 +419,8 @@ pub async fn run(
                                 app.selected_message
                                     .map(|i| if i == 0 { len - 1 } else { i - 1 })
                                     .unwrap_or(len - 1),
-                            )
+                            );
+                            app.scroll_to_message = app.selected_message;
                         };
                     }
                     _ => {}

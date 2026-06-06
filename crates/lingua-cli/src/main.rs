@@ -1,6 +1,4 @@
-use lingua_core::{
-    call_api_with_retry, LinguaError, Message, NaiveLemmatizer, SessionConfig, VocabDb,
-};
+use lingua_core::{LinguaError, SessionConfig, VocabDb};
 
 mod tui;
 

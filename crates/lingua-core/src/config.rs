@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::fmt;
 
-// #[derive(Default)]
+#[derive(Clone)]
 pub struct SessionConfig {
     pub level: String,
     pub topic: String,
