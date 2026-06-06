@@ -39,17 +39,17 @@ async fn call_api(
     history: &[Message],
     system: &str,
 ) -> Result<String, LinguaError> {
-    let api_history: Vec<Message> = history
-        .iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
-        .cloned()
-        .collect();
-
+    // let api_history: Vec<Message> = history
+    //     .iter()
+    //     .filter(|m| m.role == "user" || m.role == "assistant")
+    //     .cloned()
+    //     .collect();
+    //
     let request_body = ApiRequest {
         model: "claude-haiku-4-5-20251001",
         max_tokens: 1024,
         system,
-        messages: &api_history,
+        messages: history,
     };
 
     let response = client

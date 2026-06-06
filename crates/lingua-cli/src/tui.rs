@@ -53,7 +53,7 @@ fn handle_vocab_list(app: &mut App) -> Result<(), LinguaError> {
                 entry.translation.as_deref().unwrap_or("_")
             ));
         }
-        app.history.push(Message::new("ferris", &lines));
+        app.display_messages.push(Message::new("ferris", &lines));
         app.status = format!("{} Wörter geladen", vocab_list.len());
     }
     Ok(())
@@ -62,6 +62,7 @@ fn handle_vocab_list(app: &mut App) -> Result<(), LinguaError> {
 fn handle_send_message(app: &mut App, text: String) -> Result<(), LinguaError> {
     app.msg_requested = true;
     app.history.push(Message::new("user", &text));
+    app.display_messages.push(Message::new("user", &text));
     app.status = "Warte auf Antwort...".to_string();
     Ok(())
 }
@@ -96,6 +97,7 @@ pub struct App {
     should_quit: bool,
     msg_requested: bool,
     pub scroll: usize,
+    display_messages: Vec<Message>,
 }
 
 fn handle_commands(input: &str) -> CommandsKind {
@@ -132,8 +134,8 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         ])
         .split(frame.area());
 
-    let history_lines: Vec<Line> = app
-        .history
+    let display_lines: Vec<Line> = app
+        .display_messages
         .iter()
         .flat_map(|msg| {
             let (label, color) = match msg.role.as_str() {
@@ -160,7 +162,7 @@ fn draw(frame: &mut ratatui::Frame, app: &App) {
         })
         .collect();
 
-    let chat_widget = Paragraph::new(history_lines)
+    let chat_widget = Paragraph::new(display_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -228,6 +230,7 @@ pub async fn run(
         should_quit: false,
         msg_requested: false,
         scroll: 0,
+        display_messages: Vec::new(),
     };
 
     let (tx, mut rx) = mpsc::channel::<Result<String, LinguaError>>(1);
@@ -261,7 +264,9 @@ pub async fn run(
                 match result {
                     Ok(response) => {
                         app.history.push(Message::new("assistant", &response));
-                        app.scroll = app.history.len().saturating_sub(1);
+                        app.display_messages
+                            .push(Message::new("assistant", &response));
+                        app.scroll = app.display_messages.len().saturating_sub(1);
                         app.status.clear();
                     }
                     Err(e) => {
